@@ -1,0 +1,25 @@
+<div class="app-shell">
+  <header *ngIf="showHeader">
+    <h1>{{ title }}</h1>
+  </header>
+
+  <main>
+    <div *ngIf="isLoading; else content">
+      <p>Loading...</p>
+    </div>
+
+    <ng-template #content>
+      <ul>
+        <li *ngFor="let item of items; trackBy: trackByIndex">
+          {{ item }}
+        </li>
+      </ul>
+    </ng-template>
+
+    <section *ngIf="items.length > 0">
+      <p>{{ items.length }} items loaded</p>
+    </section>
+  </main>
+
+  <router-outlet></router-outlet>
+</div>
