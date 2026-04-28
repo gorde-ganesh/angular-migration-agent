@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { AuditReport, MessageParam, Tool } from '../types';
 import { readFile } from '../tools/file-tools';
 import { fetchNpmRegistry } from '../tools/npm-registry';
@@ -18,67 +18,80 @@ Be thorough — check every @angular/* and closely related package you find in p
 
 const TOOLS: Tool[] = [
   {
-    name: 'read_file',
-    description: 'Read the contents of a file from the filesystem.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Absolute path to the file' },
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read the contents of a file from the filesystem.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute path to the file' },
+        },
+        required: ['path'],
       },
-      required: ['path'],
     },
   },
   {
-    name: 'fetch_npm_registry',
-    description: 'Fetch latest version and peer dependencies for a package from npm registry.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        package_name: { type: 'string', description: 'npm package name, e.g. @angular/core' },
+    type: 'function',
+    function: {
+      name: 'fetch_npm_registry',
+      description: 'Fetch latest version and peer dependencies for a package from npm registry.',
+      parameters: {
+        type: 'object',
+        properties: {
+          package_name: { type: 'string', description: 'npm package name, e.g. @angular/core' },
+        },
+        required: ['package_name'],
       },
-      required: ['package_name'],
     },
   },
   {
-    name: 'output_audit_report',
-    description: 'Output the final audit report as structured JSON.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        packages: {
-          type: 'object',
-          description:
-            'Map of package name to audit data: { current, latest, gap, isDirect, peerDeps, deprecated? }',
-          additionalProperties: {
+    type: 'function',
+    function: {
+      name: 'output_audit_report',
+      description: 'Output the final audit report as structured JSON.',
+      parameters: {
+        type: 'object',
+        properties: {
+          packages: {
             type: 'object',
-            properties: {
-              current: { type: 'string' },
-              latest: { type: 'string' },
-              gap: { type: 'number' },
-              isDirect: { type: 'boolean' },
-              peerDeps: { type: 'object' },
-              deprecated: { type: 'string' },
+            description:
+              'Map of package name to audit data: { current, latest, gap, isDirect, peerDeps, deprecated? }',
+            additionalProperties: {
+              type: 'object',
+              properties: {
+                current: { type: 'string' },
+                latest: { type: 'string' },
+                gap: { type: 'number' },
+                isDirect: { type: 'boolean' },
+                peerDeps: { type: 'object' },
+                deprecated: { type: 'string' },
+              },
+              required: ['current', 'latest', 'gap', 'isDirect', 'peerDeps'],
             },
-            required: ['current', 'latest', 'gap', 'isDirect', 'peerDeps'],
           },
         },
+        required: ['packages'],
       },
-      required: ['packages'],
     },
   },
 ];
 
 export class AuditAgent {
-  private client: Anthropic;
+  private client: OpenAI;
 
   constructor() {
-    this.client = new Anthropic();
+    this.client = new OpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: process.env['OPENROUTER_API_KEY'],
+    });
   }
 
   async run(projectPath: string): Promise<AuditReport> {
     const pkgJsonPath = path.join(projectPath, 'package.json');
 
     const messages: MessageParam[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: `Audit the Angular project at: ${projectPath}\n\nStart by reading ${pkgJsonPath}, then fetch npm registry data for each relevant package you find.`,
@@ -87,40 +100,42 @@ export class AuditAgent {
 
     let auditPackages: AuditReport['packages'] | null = null;
 
-    let response = await this.client.messages.create({
-      model: 'claude-sonnet-4-6',
+    let response = await this.client.chat.completions.create({
+      model: 'anthropic/claude-sonnet-4-6',
       max_tokens: 4096,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: TOOLS,
       messages,
+      tools: TOOLS,
     });
 
-    while (response.stop_reason === 'tool_use') {
-      const toolResults: Anthropic.MessageParam['content'] = [];
+    while (response.choices[0].finish_reason === 'tool_calls') {
+      const choice = response.choices[0];
+      const toolCalls = choice.message.tool_calls ?? [];
+      const toolResultMap: Record<string, string> = {};
 
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
+      for (const call of toolCalls) {
+        if (call.type !== 'function') continue;
 
+        const toolName = call.function.name;
+        const toolInput = JSON.parse(call.function.arguments);
         let result: unknown;
 
-        if (block.name === 'read_file') {
-          const input = block.input as { path: string };
+        if (toolName === 'read_file') {
+          const input = toolInput as { path: string };
           try {
             result = await readFile(input.path);
           } catch (e) {
             result = `Error: ${(e as Error).message}`;
           }
-        } else if (block.name === 'fetch_npm_registry') {
-          const input = block.input as { package_name: string };
+        } else if (toolName === 'fetch_npm_registry') {
+          const input = toolInput as { package_name: string };
           try {
             const data = await fetchNpmRegistry(input.package_name);
             result = data;
           } catch (e) {
             result = `Error fetching ${input.package_name}: ${(e as Error).message}`;
           }
-        } else if (block.name === 'output_audit_report') {
-          const input = block.input as { packages: Record<string, unknown> };
-          // Compute gap for each entry
+        } else if (toolName === 'output_audit_report') {
+          const input = toolInput as { packages: Record<string, unknown> };
           const packages: AuditReport['packages'] = {};
           for (const [name, raw] of Object.entries(input.packages)) {
             const p = raw as {
@@ -139,30 +154,31 @@ export class AuditAgent {
           auditPackages = packages;
           result = 'Audit report recorded.';
         } else {
-          result = `Unknown tool: ${block.name}`;
+          result = `Unknown tool: ${toolName}`;
         }
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: typeof result === 'string' ? result : JSON.stringify(result),
-        });
+        toolResultMap[call.id] = typeof result === 'string' ? result : JSON.stringify(result);
       }
 
-      messages.push({ role: 'assistant', content: response.content });
-      messages.push({ role: 'user', content: toolResults });
+      messages.push({
+        role: 'assistant',
+        content: choice.message.content,
+        tool_calls: choice.message.tool_calls,
+      });
+      for (const call of toolCalls) {
+        messages.push({ role: 'tool', tool_call_id: call.id, content: toolResultMap[call.id] ?? '' });
+      }
 
-      response = await this.client.messages.create({
-        model: 'claude-sonnet-4-6',
+      response = await this.client.chat.completions.create({
+        model: 'anthropic/claude-sonnet-4-6',
         max_tokens: 4096,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        tools: TOOLS,
         messages,
+        tools: TOOLS,
       });
     }
 
     if (!auditPackages) {
-      throw new Error('Audit agent did not produce a report. Check your ANTHROPIC_API_KEY.');
+      throw new Error('Audit agent did not produce a report. Check your OPENROUTER_API_KEY.');
     }
 
     return {

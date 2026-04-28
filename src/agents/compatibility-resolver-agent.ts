@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { AuditReport, CompatibilityReport, MessageParam, Tool } from '../types';
 import { fetchPeerDepsForVersion } from '../tools/npm-registry';
 import { getIncrementalMajors, getMajorVersion } from '../tools/semver-utils';
@@ -25,64 +25,73 @@ Always prefer the safe incremental path over the fastest path.`;
 
 const TOOLS: Tool[] = [
   {
-    name: 'fetch_peer_deps',
-    description: 'Fetch peer dependencies for a specific package@version from npm.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        package_name: { type: 'string' },
-        version: { type: 'string' },
+    type: 'function',
+    function: {
+      name: 'fetch_peer_deps',
+      description: 'Fetch peer dependencies for a specific package@version from npm.',
+      parameters: {
+        type: 'object',
+        properties: {
+          package_name: { type: 'string' },
+          version: { type: 'string' },
+        },
+        required: ['package_name', 'version'],
       },
-      required: ['package_name', 'version'],
     },
   },
   {
-    name: 'output_compatibility_report',
-    description: 'Output the final compatibility and upgrade-order report.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        conflicts: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              package: { type: 'string' },
-              conflictsWith: { type: 'string' },
-              reason: { type: 'string' },
-              resolution: { type: 'string' },
+    type: 'function',
+    function: {
+      name: 'output_compatibility_report',
+      description: 'Output the final compatibility and upgrade-order report.',
+      parameters: {
+        type: 'object',
+        properties: {
+          conflicts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                package: { type: 'string' },
+                conflictsWith: { type: 'string' },
+                reason: { type: 'string' },
+                resolution: { type: 'string' },
+              },
+              required: ['package', 'conflictsWith', 'reason', 'resolution'],
             },
-            required: ['package', 'conflictsWith', 'reason', 'resolution'],
           },
-        },
-        upgradeOrder: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              order: { type: 'number' },
-              package: { type: 'string' },
-              fromVersion: { type: 'string' },
-              toVersion: { type: 'string' },
-              intermediateVersions: { type: 'array', items: { type: 'string' } },
-              notes: { type: 'array', items: { type: 'string' } },
+          upgradeOrder: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                order: { type: 'number' },
+                package: { type: 'string' },
+                fromVersion: { type: 'string' },
+                toVersion: { type: 'string' },
+                intermediateVersions: { type: 'array', items: { type: 'string' } },
+                notes: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['order', 'package', 'fromVersion', 'toVersion', 'intermediateVersions', 'notes'],
             },
-            required: ['order', 'package', 'fromVersion', 'toVersion', 'intermediateVersions', 'notes'],
           },
+          blockers: { type: 'array', items: { type: 'string' } },
+          summary: { type: 'string' },
         },
-        blockers: { type: 'array', items: { type: 'string' } },
-        summary: { type: 'string' },
+        required: ['conflicts', 'upgradeOrder', 'blockers', 'summary'],
       },
-      required: ['conflicts', 'upgradeOrder', 'blockers', 'summary'],
     },
   },
 ];
 
 export class CompatibilityResolverAgent {
-  private client: Anthropic;
+  private client: OpenAI;
 
   constructor() {
-    this.client = new Anthropic();
+    this.client = new OpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: process.env['OPENROUTER_API_KEY'],
+    });
   }
 
   async run(audit: AuditReport): Promise<CompatibilityReport> {
@@ -97,6 +106,7 @@ export class CompatibilityResolverAgent {
       : '';
 
     const messages: MessageParam[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: `Resolve upgrade compatibility for this Angular project.\n\nPackages:\n${packageSummary}\n\n${angularHints}\n\nFetch peer deps for key packages at their target versions, then output the ordered upgrade plan.`,
@@ -105,32 +115,35 @@ export class CompatibilityResolverAgent {
 
     let report: CompatibilityReport | null = null;
 
-    let response = await this.client.messages.create({
-      model: 'claude-sonnet-4-6',
+    let response = await this.client.chat.completions.create({
+      model: 'anthropic/claude-sonnet-4-6',
       max_tokens: 4096,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: TOOLS,
       messages,
+      tools: TOOLS,
     });
 
-    while (response.stop_reason === 'tool_use') {
-      const toolResults: Anthropic.MessageParam['content'] = [];
+    while (response.choices[0].finish_reason === 'tool_calls') {
+      const choice = response.choices[0];
+      const toolCalls = choice.message.tool_calls ?? [];
+      const toolResultMap: Record<string, string> = {};
 
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
+      for (const call of toolCalls) {
+        if (call.type !== 'function') continue;
 
+        const toolName = call.function.name;
+        const toolInput = JSON.parse(call.function.arguments);
         let result: unknown;
 
-        if (block.name === 'fetch_peer_deps') {
-          const input = block.input as { package_name: string; version: string };
+        if (toolName === 'fetch_peer_deps') {
+          const input = toolInput as { package_name: string; version: string };
           try {
             const peerDeps = await fetchPeerDepsForVersion(input.package_name, input.version);
             result = peerDeps;
           } catch (e) {
             result = `Error: ${(e as Error).message}`;
           }
-        } else if (block.name === 'output_compatibility_report') {
-          const input = block.input as CompatibilityReport;
+        } else if (toolName === 'output_compatibility_report') {
+          const input = toolInput as CompatibilityReport;
 
           // Enrich intermediate versions using semver utils for Angular packages
           const enriched = input.upgradeOrder.map((step) => {
@@ -149,25 +162,26 @@ export class CompatibilityResolverAgent {
           report = { ...input, upgradeOrder: enriched };
           result = 'Compatibility report recorded.';
         } else {
-          result = `Unknown tool: ${block.name}`;
+          result = `Unknown tool: ${toolName}`;
         }
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: typeof result === 'string' ? result : JSON.stringify(result),
-        });
+        toolResultMap[call.id] = typeof result === 'string' ? result : JSON.stringify(result);
       }
 
-      messages.push({ role: 'assistant', content: response.content });
-      messages.push({ role: 'user', content: toolResults });
+      messages.push({
+        role: 'assistant',
+        content: choice.message.content,
+        tool_calls: choice.message.tool_calls,
+      });
+      for (const call of toolCalls) {
+        messages.push({ role: 'tool', tool_call_id: call.id, content: toolResultMap[call.id] ?? '' });
+      }
 
-      response = await this.client.messages.create({
-        model: 'claude-sonnet-4-6',
+      response = await this.client.chat.completions.create({
+        model: 'anthropic/claude-sonnet-4-6',
         max_tokens: 4096,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        tools: TOOLS,
         messages,
+        tools: TOOLS,
       });
     }
 

@@ -1,8 +1,7 @@
-import type Anthropic from '@anthropic-ai/sdk';
+import type OpenAI from 'openai';
 
-export type MessageParam = Anthropic.MessageParam;
-export type Tool = Anthropic.Tool;
-export type TextBlockParam = Anthropic.TextBlockParam;
+export type MessageParam = OpenAI.Chat.ChatCompletionMessageParam;
+export type Tool = OpenAI.Chat.ChatCompletionTool;
 
 // ── Audit ──────────────────────────────────────────────────────────────────
 
