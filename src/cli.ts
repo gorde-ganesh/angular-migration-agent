@@ -36,9 +36,9 @@ program
       process.exit(1);
     }
 
-    if (!process.env['ANTHROPIC_API_KEY']) {
-      console.error(chalk.red('Error: ANTHROPIC_API_KEY environment variable is not set.'));
-      console.error(chalk.gray('  Copy .env.example to .env and add your API key, or export it directly.'));
+    if (!process.env['OPENROUTER_API_KEY']) {
+      console.error(chalk.red('Error: OPENROUTER_API_KEY environment variable is not set.'));
+      console.error(chalk.gray('  Copy .env.example to .env and add your OpenRouter API key, or export it directly.'));
       process.exit(1);
     }
 
@@ -91,8 +91,8 @@ program
   .action(async (opts) => {
     const projectPath = path.resolve(opts.project);
 
-    if (!process.env['ANTHROPIC_API_KEY']) {
-      console.error(chalk.red('Error: ANTHROPIC_API_KEY is not set.'));
+    if (!process.env['OPENROUTER_API_KEY']) {
+      console.error(chalk.red('Error: OPENROUTER_API_KEY is not set.'));
       process.exit(1);
     }
 

@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { BuildError, MessageParam, Tool, ValidationResult } from '../types';
 import { runCommand } from '../tools/command-runner';
 import { readFile, fileExists } from '../tools/file-tools';
@@ -23,60 +23,72 @@ Be precise about which errors are blocking (build failures) vs warnings.`;
 
 const TOOLS: Tool[] = [
   {
-    name: 'run_command',
-    description: 'Run a shell command to validate the build.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string' },
-        cwd: { type: 'string' },
-      },
-      required: ['command'],
-    },
-  },
-  {
-    name: 'read_file',
-    description: 'Read a file to inspect errors or configuration.',
-    input_schema: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'output_validation_result',
-    description: 'Output the validation result.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        errors: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              file: { type: 'string' },
-              line: { type: 'number' },
-              column: { type: 'number' },
-              code: { type: 'string' },
-              message: { type: 'string' },
-            },
-            required: ['code', 'message'],
-          },
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Run a shell command to validate the build.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          cwd: { type: 'string' },
         },
-        warnings: { type: 'array', items: { type: 'string' } },
-        rawOutput: { type: 'string' },
+        required: ['command'],
       },
-      required: ['success', 'errors', 'warnings', 'rawOutput'],
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file to inspect errors or configuration.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'output_validation_result',
+      description: 'Output the validation result.',
+      parameters: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean' },
+          errors: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                file: { type: 'string' },
+                line: { type: 'number' },
+                column: { type: 'number' },
+                code: { type: 'string' },
+                message: { type: 'string' },
+              },
+              required: ['code', 'message'],
+            },
+          },
+          warnings: { type: 'array', items: { type: 'string' } },
+          rawOutput: { type: 'string' },
+        },
+        required: ['success', 'errors', 'warnings', 'rawOutput'],
+      },
     },
   },
 ];
 
 export class ValidatorAgent {
-  private client: Anthropic;
+  private client: OpenAI;
 
   constructor() {
-    this.client = new Anthropic();
+    this.client = new OpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: process.env['OPENROUTER_API_KEY'],
+    });
   }
 
   async validate(projectPath: string): Promise<ValidationResult> {
@@ -84,6 +96,7 @@ export class ValidatorAgent {
     const hasAngularJson = fileExists(path.join(projectPath, 'angular.json'));
 
     const messages: MessageParam[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
         content: `Validate the Angular project at: ${projectPath}
@@ -98,24 +111,27 @@ Run TypeScript type-checking first (npx tsc --noEmit), then parse any errors and
 
     let result: ValidationResult | null = null;
 
-    let response = await this.client.messages.create({
-      model: 'claude-sonnet-4-6',
+    let response = await this.client.chat.completions.create({
+      model: 'anthropic/claude-sonnet-4-6',
       max_tokens: 4096,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: TOOLS,
       messages,
+      tools: TOOLS,
     });
 
-    while (response.stop_reason === 'tool_use') {
-      const toolResults: Anthropic.MessageParam['content'] = [];
+    while (response.choices[0].finish_reason === 'tool_calls') {
+      const choice = response.choices[0];
+      const toolCalls = choice.message.tool_calls ?? [];
+      const toolResultMap: Record<string, string> = {};
 
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
+      for (const call of toolCalls) {
+        if (call.type !== 'function') continue;
 
+        const toolName = call.function.name;
+        const toolInput = JSON.parse(call.function.arguments);
         let toolResult: unknown;
 
-        if (block.name === 'run_command') {
-          const input = block.input as { command: string; cwd?: string };
+        if (toolName === 'run_command') {
+          const input = toolInput as { command: string; cwd?: string };
           const cmdResult = runCommand(input.command, input.cwd ?? projectPath, 180_000);
           toolResult = {
             exitCode: cmdResult.exitCode,
@@ -123,37 +139,38 @@ Run TypeScript type-checking first (npx tsc --noEmit), then parse any errors and
             stderr: cmdResult.stderr.slice(0, 2000),
             success: cmdResult.success,
           };
-        } else if (block.name === 'read_file') {
-          const input = block.input as { path: string };
+        } else if (toolName === 'read_file') {
+          const input = toolInput as { path: string };
           try {
             toolResult = await readFile(input.path);
           } catch (e) {
             toolResult = `Error: ${(e as Error).message}`;
           }
-        } else if (block.name === 'output_validation_result') {
-          const input = block.input as ValidationResult;
+        } else if (toolName === 'output_validation_result') {
+          const input = toolInput as ValidationResult;
           result = input;
           toolResult = 'Validation result recorded.';
         } else {
-          toolResult = `Unknown tool: ${block.name}`;
+          toolResult = `Unknown tool: ${toolName}`;
         }
 
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
-        });
+        toolResultMap[call.id] = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
       }
 
-      messages.push({ role: 'assistant', content: response.content });
-      messages.push({ role: 'user', content: toolResults });
+      messages.push({
+        role: 'assistant',
+        content: choice.message.content,
+        tool_calls: choice.message.tool_calls,
+      });
+      for (const call of toolCalls) {
+        messages.push({ role: 'tool', tool_call_id: call.id, content: toolResultMap[call.id] ?? '' });
+      }
 
-      response = await this.client.messages.create({
-        model: 'claude-sonnet-4-6',
+      response = await this.client.chat.completions.create({
+        model: 'anthropic/claude-sonnet-4-6',
         max_tokens: 4096,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        tools: TOOLS,
         messages,
+        tools: TOOLS,
       });
     }
 
