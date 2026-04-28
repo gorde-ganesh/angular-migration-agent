@@ -1,105 +1,188 @@
-## Angular Migration Agent — Brainstorm
+# Angular Migration Agent
+
+A full **Angular project health + migration orchestrator** powered by Claude AI. Point it at any Angular project and it audits, plans, and executes a complete version migration — with a self-healing executor/validator loop.
 
 ---
 
-### Core Concept
-An agentic CLI tool that accepts an Angular component (or entire module) and autonomously migrates it to a target Angular version, using a plan → execute → validate loop.
-
----
-
-### Problem It Solves
-Angular has had **massive breaking changes** across v14→v19:
-- Module-based → Standalone components
-- `@Input()` decorators → Signal inputs (`input()`)
-- `ngOnChanges` → `effect()`
-- `HttpClient` providers → `provideHttpClient()`
-- `RouterModule` → `provideRouter()`
-- Zone.js → Zoneless change detection
-- Old `ngIf`/`ngFor` → `@if` / `@for` control flow
-
-Doing this manually is tedious, error-prone, and repetitive — a perfect agent job.
-
----
-
-### Agent Architecture
+## Architecture
 
 ```
-User Input (file/folder)
+User Input (Angular project root)
         ↓
-  [Planner Agent]
-  Analyzes code, detects Angular version,
-  lists all migration tasks
+ [Audit Agent]                    reads package.json, fetches npm registry,
+                                  detects version gaps, flags deprecated APIs
         ↓
-  [Executor Agent]  ←──── has tools (read/write/lint)
-  Works task by task, rewrites code
+ [Docs Fetcher Agent]             fetches changelogs from GitHub (Angular, NgRx,
+                                  Material, RxJS), chunks + stores for RAG
         ↓
-  [Validator Agent]
-  Runs ng build / eslint, checks for errors,
-  sends failures back to Executor (self-healing loop)
+ [Compatibility Resolver Agent]   cross-checks peer deps, builds constraint graph,
+                                  produces safe incremental upgrade order
         ↓
-  Output: migrated file + migration report
+ [Planner Agent]                  queries RAG, creates ordered step-by-step plan
+        ↓
+ [Executor Agent]  ←── tools: read/write files, run commands, semantic_search
+                                  executes each step with full tool use
+        ↓
+ [Validator Agent]                runs tsc --noEmit, parses errors, returns to
+                                  Executor with context (self-healing loop, up to N retries)
+        ↓
+ migration-report.md              full audit, plan, diff log, manual steps
 ```
 
 ---
 
-### Tools the Agent Would Have
-- `read_file` — read source `.ts` / `.html` files
-- `write_file` — write transformed output
-- `run_command` — execute `ng build`, `ng lint`, `tsc --noEmit`
-- `search_angular_docs` — RAG over Angular changelog/migration guides
-- `diff_viewer` — show before/after for each change
+## What It Migrates
 
----
-
-### Key Gen AI / Agentic Concepts You'd Learn
-
-| Concept | Where it appears |
+| Angular Version Gap | Automated Migrations |
 |---|---|
-| **Planning agent** | Decomposing migration into ordered tasks |
-| **Tool use** | File I/O, shell commands |
-| **Self-reflection / retry loops** | Validator sends errors back to Executor |
-| **RAG** | Grounding on Angular docs to avoid hallucinations |
-| **Structured outputs** | Migration plan as JSON, report as markdown |
-| **Context management** | Handling large codebases within token limits |
+| Any → 15+ | `HttpClientModule` → `provideHttpClient()` |
+| Any → 15+ | `RouterModule.forRoot()` → `provideRouter()` |
+| Any → 17+ | `*ngIf` / `*ngFor` → `@if` / `@for` control flow |
+| Any → 17+ | `@Input()` → `input()` signal |
+| Any → 17+ | `@Output()` → `output()` signal |
+| Any → 19+ | NgModule → Standalone components |
+| All | Incremental `npm install` per major version |
+| All | TypeScript upgrade before Angular |
 
 ---
 
-### Phases to Build It
+## Key Gen AI Concepts Demonstrated
 
-**Phase 1 — Single file, one migration rule**
-Migrate `*ngIf` → `@if` in one component. Get the loop working end to end.
-
-**Phase 2 — Multi-rule planner**
-Planner detects all applicable rules in a file and sequences them safely.
-
-**Phase 3 — Validation loop**
-Integrate `tsc --noEmit` output as feedback. Agent fixes its own errors.
-
-**Phase 4 — Multi-file / project-level**
-Walk an entire `src/` directory, maintain cross-file context (shared services, module imports).
-
-**Phase 5 — RAG layer**
-Embed Angular migration guides so the agent can look up rules it's unsure about.
+| Concept | Where |
+|---|---|
+| Multi-agent orchestration | 6 specialised agents called in sequence |
+| Tool use / function calling | Each agent defines and calls its own tools |
+| RAG (retrieval-augmented generation) | Docs Fetcher + semantic_search in Planner/Executor |
+| Structured JSON outputs | Every agent returns typed data via output tool |
+| Self-healing agentic loop | Executor → Validator → retry with error context |
+| Prompt caching | `cache_control: ephemeral` on all system prompts + large doc payloads |
+| Dependency graph reasoning | Compatibility Resolver topological sort |
 
 ---
 
-### Stack Suggestion
+## Getting Started
 
-- **Language:** TypeScript (Node.js) — stays in your ecosystem
-- **LLM:** Anthropic Claude API (claude-sonnet-4)
-- **Agent framework:** Raw API calls first → then optionally LangGraph or Mastra
-- **CLI:** Commander.js or yargs
-- **Testing:** Vitest with fixture components at each Angular version
+### 1. Install
+
+```bash
+git clone <this-repo>
+cd angular-migration-agent
+npm install
+```
+
+### 2. Set API Key
+
+```bash
+cp .env.example .env
+# edit .env and add your ANTHROPIC_API_KEY
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### 3. Run
+
+```bash
+# Full migration (with changes)
+npm run dev -- migrate --project ./fixtures/angular14-sample
+
+# Dry run — audit + plan, no file writes
+npm run dev -- migrate --project ./fixtures/angular14-sample --dry-run
+
+# Just audit (fastest, cheapest)
+npm run dev -- audit --project ./fixtures/angular14-sample
+```
+
+### Build & use as CLI
+
+```bash
+npm run build
+node dist/cli.js migrate --project /path/to/your/angular-project
+```
 
 ---
 
-### What Makes It Portfolio-Worthy
+## CLI Reference
 
-1. Solves a **real pain point** every Angular team has
-2. Demonstrates you understand Angular deeply (signals, standalone, control flow)
-3. Shows agentic patterns: plan → execute → validate → retry
-4. Directly relevant to **Senior Frontend roles** — you're solving your own domain's problems with AI
+```
+angular-migrate migrate [options]
+
+Options:
+  -p, --project <path>      Angular project root (required)
+  -t, --target <version>    Target Angular version (default: latest)
+  -d, --dry-run             Plan only — no writes or installs
+  -r, --max-retries <n>     Self-healing retries per step (default: 3)
+      --skip-docs           Skip changelog fetching (faster)
+  -v, --verbose             Show detailed error output
+  -o, --output <path>       Custom path for migration-report.md
+
+angular-migrate audit [options]
+
+Options:
+  -p, --project <path>      Angular project root (required)
+```
 
 ---
 
-Want to go even deeper on the architecture, or start mapping out Phase 1 in detail?
+## Project Structure
+
+```
+src/
+├── cli.ts                           CLI entry point (Commander.js)
+├── orchestrator.ts                  Phase sequencer + self-healing loop
+├── types.ts                         Shared TypeScript types
+├── agents/
+│   ├── audit-agent.ts               Reads package.json, fetches npm registry
+│   ├── docs-fetcher-agent.ts        Fetches changelogs, stores in RAG
+│   ├── compatibility-resolver-agent.ts  Peer dep graph + safe upgrade order
+│   ├── planner-agent.ts             Ordered step plan via RAG queries
+│   ├── executor-agent.ts            Reads/writes files, runs commands
+│   └── validator-agent.ts           tsc --noEmit, parses errors
+├── tools/
+│   ├── file-tools.ts                read_file / write_file / list_files
+│   ├── npm-registry.ts              fetch_npm_registry (live API)
+│   ├── web-fetch.ts                 web_fetch (changelogs, guides)
+│   ├── command-runner.ts            run_command (npm, tsc, ng)
+│   ├── semver-utils.ts              version comparison + incremental paths
+│   └── doc-store.ts                 In-memory RAG: chunk + keyword search
+└── reporter/
+    └── migration-reporter.ts        Markdown report generator
+
+fixtures/
+└── angular14-sample/                Sample Angular 14 project with:
+    ├── package.json                   @angular/core 14, NgRx 14, Material 14
+    └── src/app/
+        ├── app.module.ts              NgModule + RouterModule + HttpClientModule
+        ├── app.component.ts           @Input/@Output decorators, ngOnChanges
+        ├── app.component.html         *ngIf / *ngFor templates
+        ├── users/                     Components using structural directives
+        └── store/                     NgRx actions/reducer/effects/selectors
+```
+
+---
+
+## Self-Healing Loop Detail
+
+```
+Executor runs: npm install @angular/core@17
+      ↓
+Validator runs: npx tsc --noEmit
+      ↓
+Fails: TS2345 in app.component.ts:12
+      ↓
+Validator sends errors back to Executor with file + line context
+      ↓
+Executor calls semantic_search("TS2345 Angular 17 input signal")
+      ↓
+Executor reads app.component.ts, patches @Input() → input()
+      ↓
+Validator runs again → pass → next step
+```
+
+---
+
+## Stack
+
+- **Runtime:** Node.js 18+, TypeScript 5.4
+- **LLM:** Anthropic Claude (`claude-sonnet-4-6`) via `@anthropic-ai/sdk`
+- **CLI:** Commander.js
+- **Versioning:** semver
+- **RAG:** In-memory keyword search (no external vector DB needed)
